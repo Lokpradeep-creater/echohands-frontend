@@ -1,4 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react'
+import * as HandsModule from '@mediapipe/hands'
+import * as CameraModule from '@mediapipe/camera_utils'
+import type { Results } from '@mediapipe/hands'
+
+// @ts-ignore
+const Hands = ((HandsModule as any).Hands || (HandsModule as any).default?.Hands || HandsModule) as any
+// @ts-ignore
+const Camera = ((CameraModule as any).Camera || (CameraModule as any).default?.Camera || CameraModule) as any
 
 interface SignToSpeakProps {
   voices: SpeechSynthesisVoice[]
@@ -18,179 +26,216 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   speakText
 }) => {
   const [cameraActive, setCameraActive] = useState<boolean>(false)
-  const [detectedText, setDetectedText] = useState<string>('Hello')
-  const [isTranslating, setIsTranslating] = useState<boolean>(false)
-  const [confidence, setConfidence] = useState<number>(98.4)
+  const [detectedText, setDetectedText] = useState<string>('Idle')
+  const [confidence, setConfidence] = useState<number>(100.0)
   const [fps, setFps] = useState<number>(30)
-  const [history, setHistory] = useState<string[]>(['Hello', 'Welcome', 'To', 'EchoHands'])
+  const [history, setHistory] = useState<string[]>([])
+  const [cameraError, setCameraError] = useState<string | null>(null)
 
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const animationRef = useRef<number | null>(null)
+  const cameraRef = useRef<any>(null)
+  const handsRef = useRef<any>(null)
+  const prevWordRef = useRef<string>('Idle')
+  const frameCountRef = useRef<number>(0)
+  const lastFpsUpdateRef = useRef<number>(performance.now())
 
-  // Simulate Live Hand Landmarks Tracking on Canvas
+  // Trigger TTS voice announcement when the recognized word changes
+  useEffect(() => {
+    if (detectedText && detectedText !== 'Idle' && detectedText !== prevWordRef.current) {
+      speakText(detectedText)
+      setHistory(prev => {
+        if (prev[prev.length - 1] === detectedText) return prev
+        return [...prev, detectedText]
+      })
+      prevWordRef.current = detectedText
+    }
+  }, [detectedText, speakText])
+
+  // Simple hand gesture classification heuristic based on landmark distances
+  const classifyGesture = (landmarks: Array<{ x: number; y: number; z: number }>): { word: string; conf: number } => {
+    // 21 Landmark index points
+    // 0: Wrist, 4: Thumb Tip, 8: Index Tip, 12: Middle Tip, 16: Ring Tip, 20: Pinky Tip
+    // 5: Index MCP, 9: Middle MCP, 13: Ring MCP, 17: Pinky MCP
+    
+    // Check if fingers are extended (tip.y < mcp.y because y coordinates start from top)
+    const isIndexExtended = landmarks[8].y < landmarks[6].y
+    const isMiddleExtended = landmarks[12].y < landmarks[10].y
+    const isRingExtended = landmarks[16].y < landmarks[14].y
+    const isPinkyExtended = landmarks[20].y < landmarks[18].y
+    
+    // For thumb, check horizontal distance or relative position
+    const isThumbExtended = Math.abs(landmarks[4].x - landmarks[2].x) > 0.05
+
+    // 1. Open Palm -> Hello
+    if (isIndexExtended && isMiddleExtended && isRingExtended && isPinkyExtended) {
+      return { word: 'Hello', conf: 99.2 }
+    }
+    
+    // 2. Index and Middle Extended (V sign) -> Yes
+    if (isIndexExtended && isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return { word: 'Yes', conf: 98.5 }
+    }
+    
+    // 3. Only Index Extended -> Thank You
+    if (isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return { word: 'Thank You', conf: 97.4 }
+    }
+
+    // 4. Thumb and Pinky Extended -> Help
+    if (isThumbExtended && isPinkyExtended && !isIndexExtended && !isMiddleExtended && !isRingExtended) {
+      return { word: 'Help', conf: 96.8 }
+    }
+
+    // 5. All fingers folded -> Stop
+    if (!isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return { word: 'Stop', conf: 99.5 }
+    }
+
+    return { word: 'Idle', conf: 100.0 }
+  }
+
+  // Set up MediaPipe Hands and active camera utils
   useEffect(() => {
     if (!cameraActive) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
+      // Shutdown camera and hands instance
+      if (cameraRef.current) {
+        cameraRef.current.stop()
+        cameraRef.current = null
+      }
+      if (handsRef.current) {
+        handsRef.current.close()
+        handsRef.current = null
       }
       return
     }
 
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
+    const videoElement = videoRef.current
+    const canvasElement = canvasRef.current
+    if (!videoElement || !canvasElement) return
+
+    const ctx = canvasElement.getContext('2d')
     if (!ctx) return
 
-    let frame = 0
-    const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      
-      // Draw simulated camera background (dark slate)
-      ctx.fillStyle = '#0f172a'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
-      
-      // Camera grid helper
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.05)'
-      ctx.lineWidth = 1
-      for (let i = 0; i < canvas.width; i += 20) {
-        ctx.beginPath()
-        ctx.moveTo(i, 0)
-        ctx.lineTo(i, canvas.height)
-        ctx.stroke()
+    setCameraError(null)
+
+    // Initialize MediaPipe Hands
+    const hands = new Hands({
+      locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    })
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    })
+
+    hands.onResults((results: Results) => {
+      // 1. Draw webcam feed on canvas
+      ctx.save()
+      ctx.clearRect(0, 0, canvasElement.width, canvasElement.height)
+      ctx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height)
+
+      // 2. Draw tracking overlay and classify gesture
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0]
+
+        // Classify current landmarks using our heuristic
+        const gesture = classifyGesture(landmarks)
+        setDetectedText(gesture.word)
+        setConfidence(gesture.conf)
+
+        // Draw connections
+        ctx.strokeStyle = '#a855f7' // Purple-500
+        ctx.lineWidth = 3
+        ctx.shadowBlur = 10
+        ctx.shadowColor = '#a855f7'
+
+        // Connect joints (helper indices)
+        const connections = [
+          [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
+          [0, 5], [5, 6], [6, 7], [7, 8], // Index
+          [0, 9], [9, 10], [10, 11], [11, 12], // Middle
+          [0, 13], [13, 14], [14, 15], [15, 16], // Ring
+          [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
+          [5, 9], [9, 13], [13, 17] // Palm MCPs
+        ]
+
+        connections.forEach(([p1, p2]) => {
+          ctx.beginPath()
+          ctx.moveTo(landmarks[p1].x * canvasElement.width, landmarks[p1].y * canvasElement.height)
+          ctx.lineTo(landmarks[p2].x * canvasElement.width, landmarks[p2].y * canvasElement.height)
+          ctx.stroke()
+        })
+
+        // Draw joints
+        ctx.fillStyle = '#10b981' // Emerald-500
+        ctx.shadowBlur = 8
+        ctx.shadowColor = '#10b981'
+        landmarks.forEach((landmark) => {
+          ctx.beginPath()
+          ctx.arc(landmark.x * canvasElement.width, landmark.y * canvasElement.height, 5, 0, 2 * Math.PI)
+          ctx.fill()
+        })
+      } else {
+        setDetectedText('Idle')
       }
-      for (let j = 0; j < canvas.height; j += 20) {
-        ctx.beginPath()
-        ctx.moveTo(0, j)
-        ctx.lineTo(canvas.width, j)
-        ctx.stroke()
+
+      ctx.restore()
+
+      // Calculate FPS
+      frameCountRef.current++
+      const now = performance.now()
+      if (now - lastFpsUpdateRef.current >= 1000) {
+        setFps(Math.round((frameCountRef.current * 1000) / (now - lastFpsUpdateRef.current)))
+        frameCountRef.current = 0
+        lastFpsUpdateRef.current = now
       }
+    })
 
-      // Draw hand landmarks (Simulated movement)
-      const t = frame * 0.05
-      const offsetHashX = Math.sin(t) * 15
-      const offsetHashY = Math.cos(t * 0.7) * 10
+    handsRef.current = hands
 
-      const wrist = { x: 200 + offsetHashX, y: 260 + offsetHashY }
-      const thumb = [
-        { x: 160 + offsetHashX * 0.8, y: 220 + offsetHashY * 0.8 },
-        { x: 130 + offsetHashX * 0.6, y: 190 + offsetHashY * 0.6 },
-        { x: 100 + offsetHashX * 0.4, y: 165 + offsetHashY * 0.4 }
-      ]
-      const indexFinger = [
-        { x: 180 + offsetHashX, y: 180 + offsetHashY * 1.1 },
-        { x: 175 + offsetHashX, y: 135 + offsetHashY * 1.2 },
-        { x: 170 + offsetHashX, y: 95 + offsetHashY * 1.3 }
-      ]
-      const middleFinger = [
-        { x: 210 + offsetHashX * 1.1, y: 170 + offsetHashY },
-        { x: 210 + offsetHashX * 1.2, y: 115 + offsetHashY * 1.1 },
-        { x: 210 + offsetHashX * 1.3, y: 75 + offsetHashY * 1.2 }
-      ]
-      const ringFinger = [
-        { x: 240 + offsetHashX * 0.9, y: 180 + offsetHashY * 0.9 },
-        { x: 245 + offsetHashX * 0.8, y: 130 + offsetHashY * 0.8 },
-        { x: 250 + offsetHashX * 0.7, y: 90 + offsetHashY * 0.7 }
-      ]
-      const pinkyFinger = [
-        { x: 270 + offsetHashX * 0.7, y: 205 + offsetHashY * 0.7 },
-        { x: 285 + offsetHashX * 0.5, y: 165 + offsetHashY * 0.5 },
-        { x: 300 + offsetHashX * 0.3, y: 130 + offsetHashY * 0.3 }
-      ]
+    // Initialize MediaPipe Camera utils
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        if (handsRef.current) {
+          await handsRef.current.send({ image: videoElement })
+        }
+      },
+      width: 640,
+      height: 360
+    })
 
-      const fingers = [thumb, indexFinger, middleFinger, ringFinger, pinkyFinger]
+    cameraRef.current = camera
 
-      // Draw skeleton lines
-      ctx.strokeStyle = 'rgba(168, 85, 247, 0.6)' // Purple-500
-      ctx.lineWidth = 3
-      ctx.shadowBlur = 15
-      ctx.shadowColor = '#a855f7'
-
-      fingers.forEach(finger => {
-        ctx.beginPath()
-        ctx.moveTo(wrist.x, wrist.y)
-        finger.forEach(pt => ctx.lineTo(pt.x, pt.y))
-        ctx.stroke()
-      })
-
-      // Draw joints
-      ctx.fillStyle = '#10b981' // Emerald-500
-      ctx.shadowBlur = 10
-      ctx.shadowColor = '#10b981'
-      
-      const allPoints = [wrist, ...thumb, ...indexFinger, ...middleFinger, ...ringFinger, ...pinkyFinger]
-      allPoints.forEach(pt => {
-        ctx.beginPath()
-        ctx.arc(pt.x, pt.y, 6, 0, 2 * Math.PI)
-        ctx.fill()
-      })
-
-      // Add scanline
-      ctx.shadowBlur = 0
-      ctx.strokeStyle = 'rgba(16, 185, 129, 0.3)'
-      ctx.lineWidth = 2
-      const scanY = (frame * 2) % canvas.height
-      ctx.beginPath()
-      ctx.moveTo(0, scanY)
-      ctx.lineTo(canvas.width, scanY)
-      ctx.stroke()
-
-      // Active overlay indicator text
-      ctx.fillStyle = '#10b981'
-      ctx.font = 'bold 12px monospace'
-      ctx.fillText('LIVE TRACKING ACTIVE', 15, 25)
-
-      frame++
-      animationRef.current = requestAnimationFrame(draw)
-    }
-
-    draw()
+    camera.start().catch((err: any) => {
+      console.error('Camera stream access failed:', err)
+      setCameraError('Webcam access was denied or is unavailable. Please check system permissions.')
+      setCameraActive(false)
+    })
 
     return () => {
-      if (animationRef.current) cancelAnimationFrame(animationRef.current)
-    }
-  }, [cameraActive])
-
-  // Simulate FPS and Confidence variance
-  useEffect(() => {
-    if (!cameraActive) return
-    const interval = setInterval(() => {
-      setFps(Math.floor(Math.random() * 3) + 28)
-      setConfidence(parseFloat((97.5 + Math.random() * 2).toFixed(1)))
-    }, 1500)
-    return () => clearInterval(interval)
-  }, [cameraActive])
-
-  // Simulation mode
-  const triggerSimulation = () => {
-    if (isTranslating) return
-    setIsTranslating(true)
-    
-    const demoPhrases = ['Hello', 'Welcome', 'To', 'EchoHands']
-    let index = 0
-
-    const simulateStep = () => {
-      if (index < demoPhrases.length) {
-        const phrase = demoPhrases[index]
-        setDetectedText(phrase)
-        speakText(phrase)
-        setHistory(prev => {
-          if (prev[prev.length - 1] === phrase) return prev
-          return [...prev, phrase]
-        })
-        index++
-        setTimeout(simulateStep, 1500)
-      } else {
-        setIsTranslating(false)
+      if (cameraRef.current) {
+        cameraRef.current.stop()
+      }
+      if (handsRef.current) {
+        handsRef.current.close()
       }
     }
-
-    setCameraActive(true)
-    simulateStep()
-  }
+  }, [cameraActive])
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 w-full">
-      {/* Left panel: webcam preview */}
+      {/* Hidden Video element for MediaPipe frame capture */}
+      <video 
+        ref={videoRef} 
+        style={{ display: 'none' }} 
+        playsInline 
+        muted 
+      />
+
+      {/* Left panel: Active Webcam Stream Canvas */}
       <div className="lg:col-span-7 flex flex-col gap-6">
         <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-4 backdrop-blur-sm shadow-xl flex flex-col justify-between min-h-[400px]">
           <div className="flex items-center justify-between mb-4">
@@ -228,33 +273,34 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
                 </div>
               </div>
             )}
-            <div className="absolute inset-0 border border-purple-500/0 rounded-xl pointer-events-none group-hover:border-purple-500/10 transition-colors duration-500"></div>
+            
+            {cameraError && (
+              <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20">
+                <div className="text-rose-500 text-sm font-semibold mb-2">Camera Error</div>
+                <div className="text-xs text-slate-400 max-w-[320px]">{cameraError}</div>
+                <button
+                  type="button"
+                  onClick={() => setCameraActive(false)}
+                  className="mt-4 px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-semibold rounded-lg"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Action buttons */}
-          <div className="flex flex-wrap items-center gap-4 mt-6">
+          {/* Action button */}
+          <div className="flex items-center gap-4 mt-6">
             <button
               type="button"
               onClick={() => setCameraActive(!cameraActive)}
-              className={`flex-1 min-w-[160px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer ${
+              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer ${
                 cameraActive 
                   ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25' 
                   : 'bg-purple-600 text-white shadow-lg shadow-purple-600/25 hover:bg-purple-500 hover:shadow-purple-500/35 hover:-translate-y-0.5'
               }`}
             >
               {cameraActive ? 'Disable Camera' : 'Enable Camera'}
-            </button>
-
-            <button
-              type="button"
-              onClick={triggerSimulation}
-              disabled={isTranslating}
-              className="flex-1 min-w-[160px] flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700/80 disabled:opacity-50 disabled:hover:bg-slate-800 transition-all duration-300 font-medium text-sm cursor-pointer"
-            >
-              <svg className={`h-4 w-4 mr-1 ${isTranslating ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.79M9 11l3 3L22 4" />
-              </svg>
-              {isTranslating ? 'Simulating...' : 'Simulate Hand Signs'}
             </button>
           </div>
         </div>
@@ -266,8 +312,8 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
           <div>
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Detected Phrase</h2>
             <div className="bg-slate-950/80 border border-slate-900 rounded-xl p-6 min-h-[100px] flex items-center justify-between gap-4">
-              <span className="text-3xl font-bold tracking-tight text-white">{detectedText || '—'}</span>
-              {detectedText && (
+              <span className="text-3xl font-bold tracking-tight text-white">{detectedText}</span>
+              {detectedText && detectedText !== 'Idle' && (
                 <button
                   type="button"
                   onClick={() => speakText(detectedText)}

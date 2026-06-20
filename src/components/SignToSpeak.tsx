@@ -1,12 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react'
-import * as HandsModule from '@mediapipe/hands'
-import * as CameraModule from '@mediapipe/camera_utils'
-import type { Results } from '@mediapipe/hands'
-
-// @ts-ignore
-const Hands = ((HandsModule as any).Hands || (HandsModule as any).default?.Hands || HandsModule) as any
-// @ts-ignore
-const Camera = ((CameraModule as any).Camera || (CameraModule as any).default?.Camera || CameraModule) as any
 
 interface SignToSpeakProps {
   voices: SpeechSynthesisVoice[]
@@ -15,6 +7,12 @@ interface SignToSpeakProps {
   speechRate: number
   setSpeechRate: (rate: number) => void
   speakText: (text: string) => void
+}
+
+interface Results {
+  multiHandLandmarks: Array<Array<{ x: number; y: number; z: number }>>
+  multiHandedness: Array<{ index: number; score: number; label: 'Left' | 'Right' }>
+  image: HTMLCanvasElement | HTMLVideoElement | ImageBitmap
 }
 
 export const SignToSpeak: React.FC<SignToSpeakProps> = ({
@@ -31,6 +29,10 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   const [fps, setFps] = useState<number>(30)
   const [history, setHistory] = useState<string[]>([])
   const [cameraError, setCameraError] = useState<string | null>(null)
+  
+  // Script loading state
+  const [scriptsLoaded, setScriptsLoaded] = useState<boolean>(false)
+  const [loadingStatus, setLoadingStatus] = useState<string>('Loading...')
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -39,6 +41,55 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   const prevWordRef = useRef<string>('Idle')
   const frameCountRef = useRef<number>(0)
   const lastFpsUpdateRef = useRef<number>(performance.now())
+
+  // Dynamic script loader for MediaPipe
+  useEffect(() => {
+    if ((window as any).Hands && (window as any).Camera) {
+      setScriptsLoaded(true)
+      setLoadingStatus('')
+      return
+    }
+
+    setLoadingStatus('Initializing hand tracking models...')
+
+    const loadScript = (src: string): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        // Prevent duplicate scripts injection
+        const existingScript = document.querySelector(`script[src="${src}"]`)
+        if (existingScript) {
+          (existingScript as HTMLScriptElement).onload = () => resolve();
+          return
+        }
+        const script = document.createElement('script')
+        script.src = src
+        script.crossOrigin = 'anonymous'
+        script.async = true
+        script.onload = () => resolve()
+        script.onerror = () => reject(new Error(`Failed to load script: ${src}`))
+        document.head.appendChild(script)
+      })
+    }
+
+    Promise.all([
+      loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js'),
+      loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js')
+    ])
+      .then(() => {
+        // Wait a small moment to ensure constructors are registered on window object
+        setTimeout(() => {
+          if ((window as any).Hands && (window as any).Camera) {
+            setScriptsLoaded(true)
+            setLoadingStatus('')
+          } else {
+            setLoadingStatus('Constructors not registered correctly. Retrying...')
+          }
+        }, 100)
+      })
+      .catch((err) => {
+        console.error('Failed to load MediaPipe from CDN:', err)
+        setLoadingStatus('Failed to load tracking assets. Please check your internet connection.')
+      })
+  }, [])
 
   // Trigger TTS voice announcement when the recognized word changes
   useEffect(() => {
@@ -54,17 +105,10 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
   // Simple hand gesture classification heuristic based on landmark distances
   const classifyGesture = (landmarks: Array<{ x: number; y: number; z: number }>): { word: string; conf: number } => {
-    // 21 Landmark index points
-    // 0: Wrist, 4: Thumb Tip, 8: Index Tip, 12: Middle Tip, 16: Ring Tip, 20: Pinky Tip
-    // 5: Index MCP, 9: Middle MCP, 13: Ring MCP, 17: Pinky MCP
-    
-    // Check if fingers are extended (tip.y < mcp.y because y coordinates start from top)
     const isIndexExtended = landmarks[8].y < landmarks[6].y
     const isMiddleExtended = landmarks[12].y < landmarks[10].y
     const isRingExtended = landmarks[16].y < landmarks[14].y
     const isPinkyExtended = landmarks[20].y < landmarks[18].y
-    
-    // For thumb, check horizontal distance or relative position
     const isThumbExtended = Math.abs(landmarks[4].x - landmarks[2].x) > 0.05
 
     // 1. Open Palm -> Hello
@@ -97,8 +141,7 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
   // Set up MediaPipe Hands and active camera utils
   useEffect(() => {
-    if (!cameraActive) {
-      // Shutdown camera and hands instance
+    if (!cameraActive || !scriptsLoaded) {
       if (cameraRef.current) {
         cameraRef.current.stop()
         cameraRef.current = null
@@ -119,8 +162,17 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
     setCameraError(null)
 
+    const HandsClass = (window as any).Hands
+    const CameraClass = (window as any).Camera
+
+    if (!HandsClass || !CameraClass) {
+      setCameraError('Tracking drivers failed to load. Please reload the page.')
+      setCameraActive(false)
+      return
+    }
+
     // Initialize MediaPipe Hands
-    const hands = new Hands({
+    const hands = new HandsClass({
       locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
     })
 
@@ -132,16 +184,13 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
     })
 
     hands.onResults((results: Results) => {
-      // 1. Draw webcam feed on canvas
       ctx.save()
       ctx.clearRect(0, 0, canvasElement.width, canvasElement.height)
       ctx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height)
 
-      // 2. Draw tracking overlay and classify gesture
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0]
 
-        // Classify current landmarks using our heuristic
         const gesture = classifyGesture(landmarks)
         setDetectedText(gesture.word)
         setConfidence(gesture.conf)
@@ -152,14 +201,13 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
         ctx.shadowBlur = 10
         ctx.shadowColor = '#a855f7'
 
-        // Connect joints (helper indices)
         const connections = [
           [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
           [0, 5], [5, 6], [6, 7], [7, 8], // Index
           [0, 9], [9, 10], [10, 11], [11, 12], // Middle
           [0, 13], [13, 14], [14, 15], [15, 16], // Ring
           [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
-          [5, 9], [9, 13], [13, 17] // Palm MCPs
+          [5, 9], [9, 13], [13, 17] // Palm
         ]
 
         connections.forEach(([p1, p2]) => {
@@ -196,8 +244,8 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
     handsRef.current = hands
 
-    // Initialize MediaPipe Camera utils
-    const camera = new Camera(videoElement, {
+    // Initialize Camera utils
+    const camera = new CameraClass(videoElement, {
       onFrame: async () => {
         if (handsRef.current) {
           await handsRef.current.send({ image: videoElement })
@@ -223,11 +271,10 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
         handsRef.current.close()
       }
     }
-  }, [cameraActive])
+  }, [cameraActive, scriptsLoaded])
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 w-full">
-      {/* Hidden Video element for MediaPipe frame capture */}
       <video 
         ref={videoRef} 
         style={{ display: 'none' }} 
@@ -253,7 +300,12 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
           {/* Canvas Wrapper */}
           <div className="relative aspect-video w-full bg-slate-950 rounded-xl overflow-hidden border border-slate-900 flex items-center justify-center group">
-            {cameraActive ? (
+            {!scriptsLoaded ? (
+              <div className="flex flex-col items-center gap-3 p-6 text-center select-none">
+                <div className="h-8 w-8 rounded-full border-2 border-t-purple-500 border-slate-800 animate-spin" />
+                <span className="text-xs text-slate-500 font-mono">{loadingStatus}</span>
+              </div>
+            ) : cameraActive ? (
               <canvas 
                 ref={canvasRef} 
                 width={640} 
@@ -294,7 +346,8 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
             <button
               type="button"
               onClick={() => setCameraActive(!cameraActive)}
-              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer ${
+              disabled={!scriptsLoaded}
+              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer disabled:opacity-50 ${
                 cameraActive 
                   ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25' 
                   : 'bg-purple-600 text-white shadow-lg shadow-purple-600/25 hover:bg-purple-500 hover:shadow-purple-500/35 hover:-translate-y-0.5'

@@ -34,9 +34,10 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   const [liveGesture, setLiveGesture] = useState<string>('none')
   const [tokenBuffer, setTokenBuffer] = useState<string[]>([])
   const [detectedText, setDetectedText] = useState<string>('Idle')
-  const [confidence] = useState<number>(100.0)
+  const [confidence, setConfidence] = useState<number>(100.0)
   const [fps, setFps] = useState<number>(30)
   const [cameraError, setCameraError] = useState<string | null>(null)
+  const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected')
   
   // Script loading state
   const [scriptsLoaded, setScriptsLoaded] = useState<boolean>(false)
@@ -46,6 +47,8 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const cameraRef = useRef<any>(null)
   const handsRef = useRef<any>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const lastSentTimeRef = useRef<number>(0)
   const prevPhraseRef = useRef<string>('Idle')
   const frameCountRef = useRef<number>(0)
   const lastFpsUpdateRef = useRef<number>(performance.now())
@@ -109,6 +112,71 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
         setLoadingStatus('Failed to load tracking assets. Please check your internet connection.')
       })
   }, [])
+
+  // Manage WebSocket connection lifecycle
+  useEffect(() => {
+    if (!cameraActive) {
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      setWsStatus('disconnected')
+      return
+    }
+
+    setWsStatus('connecting')
+    const ws = new WebSocket("ws://127.0.0.1:8000/api/ws/gestures")
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setWsStatus('connected')
+      console.log('WebSocket connection to backend established.')
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'gesture_matched') {
+          if (data.gesture) {
+            setLiveGesture(data.gesture)
+          }
+          if (data.confidence !== undefined) {
+            setConfidence(Math.round(data.confidence * 100))
+          }
+          if (data.current_sentence !== undefined) {
+            // Keep the local tokenBuffer visual synced with backend state
+            const tokens = data.current_sentence ? data.current_sentence.trim().split(/\s+/) : []
+            setTokenBuffer(tokens)
+          }
+        } else if (data.type === 'sentence_finalized') {
+          if (data.sentence) {
+            setDetectedText(data.sentence)
+            speakText(data.sentence)
+          }
+          setTokenBuffer([])
+          setLiveGesture('none')
+        }
+      } catch (err) {
+        console.error('Failed to parse WebSocket message from backend:', err)
+      }
+    }
+
+    ws.onerror = (err) => {
+      console.error('WebSocket connection error:', err)
+    }
+
+    ws.onclose = () => {
+      setWsStatus('disconnected')
+      console.log('WebSocket connection closed.')
+    }
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+    }
+  }, [cameraActive, speakText])
 
   // Trigger TTS voice announcement when the recognized sentence changes
   useEffect(() => {
@@ -234,44 +302,58 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0]
 
-        // Classify gesture
-        const gesture = classifyGesture(landmarks)
-        setLiveGesture(gesture)
+        // 1. Throttle and stream coordinates over WebSocket if connected
+        const now = performance.now()
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && (now - lastSentTimeRef.current >= 100)) {
+          const handType = results.multiHandedness?.[0]?.label || 'Right'
+          const payload = {
+            right_hand: handType === 'Right' ? { landmarks } : null,
+            left_hand: handType === 'Left' ? { landmarks } : null
+          }
+          wsRef.current.send(JSON.stringify(payload))
+          lastSentTimeRef.current = now
+        }
 
-        // Stabilization logic: must detect the same gesture for 30 consecutive frames
-        if (gesture !== 'none') {
-          if (gesture === stableGestureRef.current) {
-            stableFramesRef.current++
-            if (stableFramesRef.current >= 30) {
-              // Convert gesture to a token based on current buffer state
-              let token = 'none'
-              
-              if (gesture === 'palm') token = 'hello'
-              else if (gesture === 'vsign') token = 'everyone'
-              else if (gesture === 'thumbsup') token = 'thank'
-              else if (gesture === 'point') token = 'you'
-              else if (gesture === 'rockon') token = 'how'
-              else if (gesture === 'fist') {
-                // If "what" is in the buffer, map fist to "name", else "had"
-                token = tokenBuffer.includes('what') ? 'name' : 'had'
-              } else if (gesture === 'shaka') {
-                // If "had" is in the buffer, map shaka to "breakfast", else "what"
-                token = tokenBuffer.includes('had') ? 'breakfast' : 'what'
-              }
+        // 2. Fallback to local classification if WebSocket is offline/disconnected
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          const gesture = classifyGesture(landmarks)
+          setLiveGesture(gesture)
 
-              if (token !== 'none') {
-                // Check that it's not a duplicate of the last token in buffer
-                setTokenBuffer(prev => {
-                  if (prev[prev.length - 1] === token) return prev
-                  return [...prev, token]
-                })
+          // Stabilization logic: must detect the same gesture for 30 consecutive frames
+          if (gesture !== 'none') {
+            if (gesture === stableGestureRef.current) {
+              stableFramesRef.current++
+              if (stableFramesRef.current >= 30) {
+                // Convert gesture to a token based on current buffer state
+                let token = 'none'
+                
+                if (gesture === 'palm') token = 'hello'
+                else if (gesture === 'vsign') token = 'everyone'
+                else if (gesture === 'thumbsup') token = 'thank'
+                else if (gesture === 'point') token = 'you'
+                else if (gesture === 'rockon') token = 'how'
+                else if (gesture === 'fist') {
+                  // If "what" is in the buffer, map fist to "name", else "had"
+                  token = tokenBuffer.includes('what') ? 'name' : 'had'
+                } else if (gesture === 'shaka') {
+                  // If "had" is in the buffer, map shaka to "breakfast", else "what"
+                  token = tokenBuffer.includes('had') ? 'breakfast' : 'what'
+                }
+
+                if (token !== 'none') {
+                  // Check that it's not a duplicate of the last token in buffer
+                  setTokenBuffer(prev => {
+                    if (prev[prev.length - 1] === token) return prev
+                    return [...prev, token]
+                  })
+                }
+                // Reset frame count so we don't trigger repeatedly
+                stableFramesRef.current = 0
               }
-              // Reset frame count so we don't trigger repeatedly
+            } else {
+              stableGestureRef.current = gesture
               stableFramesRef.current = 0
             }
-          } else {
-            stableGestureRef.current = gesture
-            stableFramesRef.current = 0
           }
         }
 
@@ -395,7 +477,17 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
               <h2 className="text-sm font-semibold text-slate-200">Video Capture Stream</h2>
             </div>
             {cameraActive && (
-              <div className="flex gap-4 text-xs text-slate-400 font-mono">
+              <div className="flex items-center gap-4 text-xs text-slate-400 font-mono">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-500">WS Status:</span>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold ${
+                    wsStatus === 'connected' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
+                    wsStatus === 'connecting' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse' :
+                    'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                  }`}>
+                    {wsStatus.toUpperCase()}
+                  </span>
+                </div>
                 <span>FPS: {fps}</span>
                 <span>Confidence: {confidence}%</span>
                 <span>Active Shape: <strong className="text-purple-400 capitalize">{liveGesture}</strong></span>

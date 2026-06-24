@@ -1,4 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react'
+// Resolve MediaPipe constructors dynamically from window
+// @ts-ignore
+const Hands = (typeof window !== 'undefined' ? (window as any).Hands : null) as any
+// @ts-ignore
+const Camera = (typeof window !== 'undefined' ? (window as any).Camera : null) as any
+
+interface Results {
+  multiHandLandmarks: Array<Array<{ x: number; y: number; z: number }>>
+  multiHandedness: Array<{ index: number; score: number; label: 'Left' | 'Right' }>
+  image: HTMLCanvasElement | HTMLVideoElement | ImageBitmap
+}
 
 interface SignToSpeakProps {
   voices: SpeechSynthesisVoice[]
@@ -7,12 +18,6 @@ interface SignToSpeakProps {
   speechRate: number
   setSpeechRate: (rate: number) => void
   speakText: (text: string) => void
-}
-
-interface Results {
-  multiHandLandmarks: Array<Array<{ x: number; y: number; z: number }>>
-  multiHandedness: Array<{ index: number; score: number; label: 'Left' | 'Right' }>
-  image: HTMLCanvasElement | HTMLVideoElement | ImageBitmap
 }
 
 export const SignToSpeak: React.FC<SignToSpeakProps> = ({
@@ -24,10 +29,13 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   speakText
 }) => {
   const [cameraActive, setCameraActive] = useState<boolean>(false)
+  
+  // Real-time gesture states
+  const [liveGesture, setLiveGesture] = useState<string>('none')
+  const [tokenBuffer, setTokenBuffer] = useState<string[]>([])
   const [detectedText, setDetectedText] = useState<string>('Idle')
-  const [confidence, setConfidence] = useState<number>(100.0)
+  const [confidence] = useState<number>(100.0)
   const [fps, setFps] = useState<number>(30)
-  const [history, setHistory] = useState<string[]>([])
   const [cameraError, setCameraError] = useState<string | null>(null)
   
   // Script loading state
@@ -38,9 +46,22 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const cameraRef = useRef<any>(null)
   const handsRef = useRef<any>(null)
-  const prevWordRef = useRef<string>('Idle')
+  const prevPhraseRef = useRef<string>('Idle')
   const frameCountRef = useRef<number>(0)
   const lastFpsUpdateRef = useRef<number>(performance.now())
+
+  // Stabilizer states
+  const stableGestureRef = useRef<string>('none')
+  const stableFramesRef = useRef<number>(0)
+
+  // Target Sentences Dictionary
+  const targetPhrasesRecipes = [
+    { recipe: ['hello', 'everyone'], sentence: 'hello everyone' },
+    { recipe: ['how', 'you'], sentence: 'how are you?' },
+    { recipe: ['thank', 'you'], sentence: 'thank you' },
+    { recipe: ['had', 'breakfast'], sentence: 'had your breakfast?' },
+    { recipe: ['what', 'name'], sentence: 'what is your name?' }
+  ]
 
   // Dynamic script loader for MediaPipe
   useEffect(() => {
@@ -54,7 +75,6 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
 
     const loadScript = (src: string): Promise<void> => {
       return new Promise((resolve, reject) => {
-        // Prevent duplicate scripts injection
         const existingScript = document.querySelector(`script[src="${src}"]`)
         if (existingScript) {
           (existingScript as HTMLScriptElement).onload = () => resolve();
@@ -75,7 +95,6 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
       loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js')
     ])
       .then(() => {
-        // Wait a small moment to ensure constructors are registered on window object
         setTimeout(() => {
           if ((window as any).Hands && (window as any).Camera) {
             setScriptsLoaded(true)
@@ -91,57 +110,89 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
       })
   }, [])
 
-  // Trigger TTS voice announcement when the recognized word changes
+  // Trigger TTS voice announcement when the recognized sentence changes
   useEffect(() => {
-    if (detectedText && detectedText !== 'Idle' && detectedText !== prevWordRef.current) {
+    if (detectedText && detectedText !== 'Idle' && detectedText !== prevPhraseRef.current) {
       speakText(detectedText)
-      setHistory(prev => {
-        if (prev[prev.length - 1] === detectedText) return prev
-        return [...prev, detectedText]
-      })
-      prevWordRef.current = detectedText
+      prevPhraseRef.current = detectedText
     }
   }, [detectedText, speakText])
 
-  // Simple hand gesture classification heuristic based on landmark distances
-  const classifyGesture = (landmarks: Array<{ x: number; y: number; z: number }>): { word: string; conf: number } => {
+  // Sentence assembler: runs whenever tokenBuffer changes
+  useEffect(() => {
+    if (tokenBuffer.length === 0) return
+
+    // Find if the current buffer matches any recipe
+    const match = targetPhrasesRecipes.find(item => {
+      if (item.recipe.length !== tokenBuffer.length) return false
+      return item.recipe.every((tok, idx) => tokenBuffer[idx] === tok)
+    })
+
+    if (match) {
+      // Set the matched sentence
+      setDetectedText(match.sentence)
+      // Reset the buffer to allow next sentence assembly
+      setTokenBuffer([])
+    }
+  }, [tokenBuffer])
+
+  // Check finger extension coordinates
+  const classifyGesture = (landmarks: Array<{ x: number; y: number; z: number }>): string => {
     const isIndexExtended = landmarks[8].y < landmarks[6].y
     const isMiddleExtended = landmarks[12].y < landmarks[10].y
     const isRingExtended = landmarks[16].y < landmarks[14].y
     const isPinkyExtended = landmarks[20].y < landmarks[18].y
     const isThumbExtended = Math.abs(landmarks[4].x - landmarks[2].x) > 0.05
 
-    // 1. Open Palm -> Hello
+    // 1. Open Palm -> palm
     if (isIndexExtended && isMiddleExtended && isRingExtended && isPinkyExtended) {
-      return { word: 'Hello', conf: 99.2 }
+      return 'palm'
     }
     
-    // 2. Index and Middle Extended (V sign) -> Yes
+    // 2. V Sign -> vsign
     if (isIndexExtended && isMiddleExtended && !isRingExtended && !isPinkyExtended) {
-      return { word: 'Yes', conf: 98.5 }
+      return 'vsign'
     }
     
-    // 3. Only Index Extended -> Thank You
+    // 3. Only Index Extended -> point
     if (isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
-      return { word: 'Thank You', conf: 97.4 }
+      return 'point'
     }
 
-    // 4. Thumb and Pinky Extended -> Help
+    // 4. Thumb and Pinky Extended -> shaka
     if (isThumbExtended && isPinkyExtended && !isIndexExtended && !isMiddleExtended && !isRingExtended) {
-      return { word: 'Help', conf: 96.8 }
+      return 'shaka'
     }
 
-    // 5. All fingers folded -> Stop
+    // 5. Thumbs Up -> thumbsup
+    if (isThumbExtended && !isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+      return 'thumbsup'
+    }
+
+    // 6. Rock On -> rockon
+    if (isIndexExtended && !isMiddleExtended && !isRingExtended && isPinkyExtended) {
+      return 'rockon'
+    }
+
+    // 7. All fingers folded -> fist
     if (!isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
-      return { word: 'Stop', conf: 99.5 }
+      return 'fist'
     }
 
-    return { word: 'Idle', conf: 100.0 }
+    return 'none'
   }
 
   // Set up MediaPipe Hands and active camera utils
   useEffect(() => {
     if (!cameraActive || !scriptsLoaded) {
+      if (cameraRef.current) {
+        cameraRef.current.stop()
+        cameraRef.current = null
+      }
+      if (handsRef.current) {
+        handsRef.current.close()
+        handsRef.current = null
+      }
       return
     }
 
@@ -183,9 +234,46 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0]
 
+        // Classify gesture
         const gesture = classifyGesture(landmarks)
-        setDetectedText(gesture.word)
-        setConfidence(gesture.conf)
+        setLiveGesture(gesture)
+
+        // Stabilization logic: must detect the same gesture for 30 consecutive frames
+        if (gesture !== 'none') {
+          if (gesture === stableGestureRef.current) {
+            stableFramesRef.current++
+            if (stableFramesRef.current >= 30) {
+              // Convert gesture to a token based on current buffer state
+              let token = 'none'
+              
+              if (gesture === 'palm') token = 'hello'
+              else if (gesture === 'vsign') token = 'everyone'
+              else if (gesture === 'thumbsup') token = 'thank'
+              else if (gesture === 'point') token = 'you'
+              else if (gesture === 'rockon') token = 'how'
+              else if (gesture === 'fist') {
+                // If "what" is in the buffer, map fist to "name", else "had"
+                token = tokenBuffer.includes('what') ? 'name' : 'had'
+              } else if (gesture === 'shaka') {
+                // If "had" is in the buffer, map shaka to "breakfast", else "what"
+                token = tokenBuffer.includes('had') ? 'breakfast' : 'what'
+              }
+
+              if (token !== 'none') {
+                // Check that it's not a duplicate of the last token in buffer
+                setTokenBuffer(prev => {
+                  if (prev[prev.length - 1] === token) return prev
+                  return [...prev, token]
+                })
+              }
+              // Reset frame count so we don't trigger repeatedly
+              stableFramesRef.current = 0
+            }
+          } else {
+            stableGestureRef.current = gesture
+            stableFramesRef.current = 0
+          }
+        }
 
         // Draw connections
         ctx.strokeStyle = '#a855f7' // Purple-500
@@ -213,13 +301,15 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
         ctx.fillStyle = '#10b981' // Emerald-500
         ctx.shadowBlur = 8
         ctx.shadowColor = '#10b981'
-        landmarks.forEach((landmark) => {
+        landmarks.forEach((landmark: any) => {
           ctx.beginPath()
           ctx.arc(landmark.x * canvasElement.width, landmark.y * canvasElement.height, 5, 0, 2 * Math.PI)
           ctx.fill()
         })
       } else {
-        setDetectedText('Idle')
+        setLiveGesture('none')
+        stableGestureRef.current = 'none'
+        stableFramesRef.current = 0
       }
 
       ctx.restore()
@@ -282,6 +372,11 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
     }
   }, [cameraActive, scriptsLoaded])
 
+  // Mock simulation for targeting full sentences
+  const triggerSimulation = (sentence: string) => {
+    setDetectedText(sentence)
+  }
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 w-full">
       <video 
@@ -303,6 +398,7 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
               <div className="flex gap-4 text-xs text-slate-400 font-mono">
                 <span>FPS: {fps}</span>
                 <span>Confidence: {confidence}%</span>
+                <span>Active Shape: <strong className="text-purple-400 capitalize">{liveGesture}</strong></span>
               </div>
             )}
           </div>
@@ -351,12 +447,12 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
           </div>
 
           {/* Action button */}
-          <div className="flex items-center gap-4 mt-6">
+          <div className="flex flex-wrap items-center gap-4 mt-6">
             <button
               type="button"
               onClick={() => setCameraActive(!cameraActive)}
               disabled={!scriptsLoaded}
-              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer disabled:opacity-50 ${
+              className={`flex-1 py-3 px-4 rounded-xl font-medium text-sm transition-all duration-300 cursor-pointer disabled:opacity-50 ${
                 cameraActive 
                   ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30 hover:bg-rose-500/25' 
                   : 'bg-purple-600 text-white shadow-lg shadow-purple-600/25 hover:bg-purple-500 hover:shadow-purple-500/35 hover:-translate-y-0.5'
@@ -366,21 +462,71 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Token Buffer HUD */}
+        <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-5 backdrop-blur-sm shadow-xl flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Gesture Token Buffer</h3>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setTokenBuffer(prev => prev.slice(0, -1))}
+                disabled={tokenBuffer.length === 0}
+                className="text-[10px] text-slate-400 hover:text-slate-200 bg-slate-950 border border-slate-900 rounded px-2.5 py-1 disabled:opacity-50"
+              >
+                Backspace
+              </button>
+              <button
+                type="button"
+                onClick={() => setTokenBuffer([])}
+                disabled={tokenBuffer.length === 0}
+                className="text-[10px] text-slate-400 hover:text-slate-200 bg-slate-950 border border-slate-900 rounded px-2.5 py-1 disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="min-h-[50px] bg-slate-950/80 border border-slate-900 rounded-xl p-3 flex flex-wrap items-center gap-2">
+            {tokenBuffer.length === 0 ? (
+              <span className="text-xs text-slate-600">Buffer is empty. Hold gestures to assemble tokens.</span>
+            ) : (
+              tokenBuffer.map((tok, idx) => (
+                <React.Fragment key={idx}>
+                  <span className="bg-purple-500/10 border border-purple-500/20 text-purple-400 font-mono text-xs px-2.5 py-1 rounded-md font-semibold">
+                    {tok}
+                  </span>
+                  {idx < tokenBuffer.length - 1 && <span className="text-slate-600 text-xs font-bold">→</span>}
+                </React.Fragment>
+              ))
+            )}
+          </div>
+          
+          {/* Guide cheatsheet */}
+          <div className="border-t border-slate-900 pt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-slate-500 leading-normal">
+            <div><strong className="text-slate-400">Palm:</strong> hello / thank</div>
+            <div><strong className="text-slate-400">V Sign:</strong> everyone / how</div>
+            <div><strong className="text-slate-400">Point:</strong> you</div>
+            <div><strong className="text-slate-400">Shaka:</strong> breakfast / what</div>
+            <div><strong className="text-slate-400">Fist:</strong> had / name</div>
+            <div><strong className="text-slate-400">ThumbsUp:</strong> thank</div>
+            <div><strong className="text-slate-400">RockOn:</strong> how</div>
+          </div>
+        </div>
       </div>
 
       {/* Right panel: translation controls & metrics */}
       <div className="lg:col-span-5 flex flex-col gap-6">
         <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 backdrop-blur-sm shadow-xl flex flex-col gap-6">
           <div>
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Detected Phrase</h2>
+            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Assembled Sentence</h2>
             <div className="bg-slate-950/80 border border-slate-900 rounded-xl p-6 min-h-[100px] flex items-center justify-between gap-4">
-              <span className="text-3xl font-bold tracking-tight text-white">{detectedText}</span>
+              <span className="text-2xl font-bold tracking-tight text-white capitalize">{detectedText}</span>
               {detectedText && detectedText !== 'Idle' && (
                 <button
                   type="button"
                   onClick={() => speakText(detectedText)}
                   className="h-12 w-12 rounded-xl bg-purple-600/10 text-purple-400 hover:bg-purple-600 hover:text-white border border-purple-500/20 hover:border-transparent flex items-center justify-center transition-all duration-300 shadow-md cursor-pointer hover:scale-105"
-                  title="Speak current text"
+                  title="Speak current sentence"
                 >
                   <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
@@ -430,42 +576,23 @@ export const SignToSpeak: React.FC<SignToSpeakProps> = ({
           </div>
         </div>
 
-        {/* Translation Logs list */}
-        <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 backdrop-blur-sm shadow-xl flex-1 flex flex-col justify-between gap-4">
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold text-slate-200">Translation Logs</h3>
-              {history.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setHistory([])}
-                  className="text-xs text-slate-500 hover:text-slate-300 font-medium cursor-pointer"
-                >
-                  Clear History
-                </button>
-              )}
-            </div>
-
-            <div className="max-h-[180px] overflow-y-auto pr-1 flex flex-col gap-2 scrollbar-thin scrollbar-thumb-slate-800">
-              {history.length === 0 ? (
-                <p className="text-xs text-slate-600 text-center py-8">No signs translated yet.</p>
-              ) : (
-                history.slice().reverse().map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-3 bg-slate-950/60 border border-slate-950 rounded-xl hover:border-slate-800/80 transition-all duration-200 group">
-                    <span className="text-sm font-medium text-slate-300">{item}</span>
-                    <button
-                      type="button"
-                      onClick={() => speakText(item)}
-                      className="text-slate-500 hover:text-purple-400 p-1 rounded-lg hover:bg-purple-500/10 opacity-0 group-hover:opacity-100 transition-all duration-200 cursor-pointer"
-                    >
-                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                      </svg>
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
+        {/* Dynamic Simulation selectors for targeting full sentences */}
+        <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-6 backdrop-blur-sm shadow-xl flex flex-col gap-4">
+          <h3 className="text-sm font-semibold text-slate-200">Trigger Target Phrases</h3>
+          <div className="flex flex-col gap-2">
+            {targetPhrasesRecipes.map((item, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => triggerSimulation(item.sentence)}
+                className="w-full text-left p-3 bg-slate-950/80 hover:bg-slate-950 border border-slate-900 hover:border-purple-500/30 rounded-xl text-xs font-semibold text-slate-300 hover:text-white transition-all cursor-pointer flex justify-between items-center group"
+              >
+                <span className="capitalize">{item.sentence}</span>
+                <span className="text-[10px] text-slate-500 font-mono group-hover:text-purple-400">
+                  {item.recipe.join(' + ')}
+                </span>
+              </button>
+            ))}
           </div>
         </div>
       </div>

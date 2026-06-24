@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react'
 export const SpeakToSign: React.FC = () => {
   const [micActive, setMicActive] = useState<boolean>(false)
   const [inputText, setInputText] = useState<string>('')
-  const [recognizedText, setRecognizedText] = useState<string>('Hello')
+  const [recognizedText, setRecognizedText] = useState<string>('hello everyone')
   const [isPlaying, setIsPlaying] = useState<boolean>(true)
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0)
   
@@ -16,136 +16,128 @@ export const SpeakToSign: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const animationRef = useRef<number | null>(null)
 
-  // Split recognized text into words
+  // Split recognized text into words/tokens
   const wordsList = recognizedText.trim().toLowerCase().split(/\s+/).filter(Boolean)
 
-  // Dictionary of known words mapped to custom SVG representations
-  const signDictionary: Record<string, { label: string; description: string; svg: React.ReactNode }> = {
-    hello: {
-      label: 'HELLO',
-      description: 'Waving open hand gesture with fingers spread out.',
+  // Normalize string for dictionary comparison (remove punctuation, lower case)
+  const cleanTranscript = recognizedText.toLowerCase().replace(/[?,.!]/g, '').trim()
+
+  // Full-Sentence Dictionaries mapping to premium SVG visualizers
+  const sentenceDictionary: Record<string, { label: string; description: string; svg: React.ReactNode }> = {
+    'hello everyone': {
+      label: 'HELLO EVERYONE',
+      description: 'Waving open palm greeting moving across to signify a group.',
       svg: (
-        <svg viewBox="0 0 100 100" className="h-28 w-28 text-purple-400 animate-pulse">
+        <svg viewBox="0 0 100 100" className="h-28 w-28 text-purple-400">
           <defs>
-            <linearGradient id="helloGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#a855f7" />
+            <linearGradient id="helloGroupGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#c084fc" />
               <stop offset="100%" stopColor="#6366f1" />
             </linearGradient>
           </defs>
-          {/* Hand Palm and Fingers */}
+          {/* Main Hand */}
           <path
-            d="M50 85 C40 85 30 75 35 60 L38 52 C35 50 33 46 34 40 L35 30 C36 28 39 28 40 30 L41 45 L44 25 C45 23 48 23 49 25 L50 45 L53 23 C54 21 57 21 58 23 L59 45 L62 25 C63 23 66 23 67 25 L67 48 L71 35 C72 33 75 34 75 36 L72 56 C70 68 62 85 50 85 Z"
-            fill="url(#helloGrad)"
-            stroke="#c084fc"
-            strokeWidth="2"
+            d="M35 75 C28 75 22 68 25 58 L28 50 C26 48 24 45 25 40 L26 30 C27 28 29 28 30 30 L31 43 L34 25 C35 23 37 23 38 25 L39 43 L42 23 C43 21 45 21 46 23 L47 43 L50 25 C51 23 53 23 54 25 L54 45 L57 33 C58 31 60 32 60 34 L58 52 C56 62 50 75 35 75 Z"
+            fill="url(#helloGroupGrad)"
+            stroke="#e9d5ff"
+            strokeWidth="1.5"
+            className="animate-bounce"
+            style={{ animationDuration: '2s' }}
           />
-          {/* Movement lines */}
-          <path d="M22 35 C20 40 20 50 22 55" stroke="#10b981" strokeWidth="2" strokeLinecap="round" fill="none" className="animate-ping" />
-          <path d="M78 35 C80 40 80 50 78 55" stroke="#10b981" strokeWidth="2" strokeLinecap="round" fill="none" className="animate-ping" />
+          {/* Sub-groups/heads in background */}
+          <circle cx="70" cy="45" r="7" fill="#475569" />
+          <circle cx="85" cy="50" r="7" fill="#475569" />
+          <circle cx="78" cy="62" r="7" fill="#334155" />
+          {/* Motion lines */}
+          <path d="M12 40 C10 44 10 50 12 54" stroke="#10b981" strokeWidth="2" strokeLinecap="round" fill="none" className="animate-pulse" />
+          <path d="M50 35 C53 38 53 43 50 46" stroke="#10b981" strokeWidth="2" strokeLinecap="round" fill="none" className="animate-pulse" />
+        </svg>
+      )
+    },
+    'how are you': {
+      label: 'HOW ARE YOU?',
+      description: 'Hands cupped turning upward, then index finger pointing forward.',
+      svg: (
+        <svg viewBox="0 0 100 100" className="h-28 w-28 text-indigo-400">
+          <defs>
+            <linearGradient id="howGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#6366f1" />
+              <stop offset="100%" stopColor="#a855f7" />
+            </linearGradient>
+          </defs>
+          {/* Left hand cupped */}
+          <path d="M25 60 C15 60 18 45 28 48 C32 50 34 55 33 58 Z" fill="url(#howGrad)" stroke="#c084fc" strokeWidth="1.5" />
+          {/* Right hand pointing forward */}
+          <path d="M50 55 L70 50 C74 49 76 53 74 56 L55 65 Z" fill="url(#howGrad)" stroke="#c084fc" strokeWidth="1.5" className="animate-pulse" />
+          {/* Question mark node */}
+          <circle cx="50" cy="25" r="5" fill="#a855f7" />
+          <path d="M47 12 C47 5 53 5 53 12 C53 16 50 18 50 20" fill="none" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round" />
         </svg>
       )
     },
     'thank you': {
       label: 'THANK YOU',
-      description: 'Flat open hand moving forward and down from the chin.',
+      description: 'Flat open hand moving forward and down from the lips.',
       svg: (
-        <svg viewBox="0 0 100 100" className="h-28 w-28 text-indigo-400">
+        <svg viewBox="0 0 100 100" className="h-28 w-28 text-blue-400">
           <defs>
-            <linearGradient id="thankGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#6366f1" />
-              <stop offset="100%" stopColor="#3b82f6" />
+            <linearGradient id="thankSentenceGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#3b82f6" />
+              <stop offset="100%" stopColor="#60a5fa" />
             </linearGradient>
           </defs>
-          {/* Side Profile Hand moving from mouth */}
+          {/* Waving hand moving out */}
           <path
-            d="M25 45 C35 42 45 42 55 45 L75 50 C80 51 82 55 80 58 L70 65 C60 70 45 70 35 65 Z"
-            fill="url(#thankGrad)"
-            stroke="#60a5fa"
-            strokeWidth="2"
+            d="M30 50 C40 45 50 45 60 48 L78 52 C82 53 84 57 82 60 L72 67 C62 72 48 72 38 67 Z"
+            fill="url(#thankSentenceGrad)"
+            stroke="#93c5fd"
+            strokeWidth="1.5"
+            className="animate-bounce"
+            style={{ animationDuration: '1.5s' }}
           />
-          {/* Chin reference dot */}
-          <circle cx="20" cy="35" r="4" fill="#a855f7" />
-          {/* Action movement arrow */}
-          <path
-            d="M30 40 Q50 30 70 45"
-            fill="none"
-            stroke="#10b981"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeDasharray="4,4"
-          />
-          <path d="M65 40 L71 46 L63 48" fill="none" stroke="#10b981" strokeWidth="3" />
+          {/* Action indicator lines */}
+          <path d="M35 40 Q55 32 72 45" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeDasharray="3,3" />
+          <path d="M68 40 L73 45 L66 47" fill="none" stroke="#10b981" strokeWidth="2" />
         </svg>
       )
     },
-    yes: {
-      label: 'YES',
-      description: 'Closed fist tilting forward and backward, nodding.',
+    'had your breakfast': {
+      label: 'HAD YOUR BREAKFAST?',
+      description: 'Hand moving to mouth representing eating, followed by the shaka signature shape.',
       svg: (
         <svg viewBox="0 0 100 100" className="h-28 w-28 text-emerald-400">
           <defs>
-            <linearGradient id="yesGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id="bfastGrad" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#10b981" />
-              <stop offset="100%" stopColor="#059669" />
+              <stop offset="100%" stopColor="#3b82f6" />
             </linearGradient>
           </defs>
-          {/* Fist representation */}
-          <rect x="35" y="40" width="30" height="30" rx="8" fill="url(#yesGrad)" stroke="#34d399" strokeWidth="2" />
-          <path d="M30 50 C30 42 35 38 42 40 L60 43 C64 44 66 48 65 52 L60 65 C58 68 52 70 45 70 Z" fill="url(#yesGrad)" opacity="0.9" />
-          {/* Thumb folded across */}
-          <path d="M30 55 Q45 58 55 50" fill="none" stroke="#34d399" strokeWidth="3" strokeLinecap="round" />
-          {/* Nodes indicating nodding */}
-          <path d="M50 20 L50 30" fill="none" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round" />
-          <path d="M47 26 L50 31 L53 26" fill="none" stroke="#a855f7" strokeWidth="2.5" />
-          <path d="M50 80 L50 72" fill="none" stroke="#a855f7" strokeWidth="2.5" strokeLinecap="round" />
-          <path d="M47 74 L50 69 L53 74" fill="none" stroke="#a855f7" strokeWidth="2.5" />
+          {/* Hand bringing food to mouth */}
+          <path d="M22 65 C22 55 35 48 40 55 L32 68 C28 72 24 72 22 65 Z" fill="url(#bfastGrad)" stroke="#6ee7b7" strokeWidth="1.5" />
+          {/* Shaka sign */}
+          <path d="M55 50 L75 52 C78 52 80 48 77 46 L60 40 L52 48 Z" fill="url(#bfastGrad)" stroke="#6ee7b7" strokeWidth="1.5" className="animate-pulse" />
+          {/* Cup/Bowl outline */}
+          <path d="M72 75 C60 75 58 65 72 65 C85 65 85 75 72 75 Z" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" />
         </svg>
       )
     },
-    no: {
-      label: 'NO',
-      description: 'Extended index and middle finger snap down onto the thumb.',
-      svg: (
-        <svg viewBox="0 0 100 100" className="h-28 w-28 text-rose-400">
-          <defs>
-            <linearGradient id="noGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#f43f5e" />
-              <stop offset="100%" stopColor="#e11d48" />
-            </linearGradient>
-          </defs>
-          {/* Hand profile showing closed fingers */}
-          <path
-            d="M30 70 C35 70 40 60 38 52 L40 42 C40 38 45 38 45 42 L42 55 L48 42 C48 38 53 38 53 42 L47 58 L54 65 C58 70 45 75 30 70 Z"
-            fill="url(#noGrad)"
-            stroke="#fda4af"
-            strokeWidth="2"
-          />
-          {/* Thumb touching fingers */}
-          <path d="M30 58 Q42 52 46 56" fill="none" stroke="#fda4af" strokeWidth="3" strokeLinecap="round" />
-          {/* Snap wave indicator */}
-          <path d="M55 45 C60 48 60 52 55 55" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" />
-        </svg>
-      )
-    },
-    stop: {
-      label: 'STOP',
-      description: 'Flat open palm extended outward, fingers vertical.',
+    'what is your name': {
+      label: 'WHAT IS YOUR NAME?',
+      description: 'Index finger tracing a vertical line, followed by palms open questioning.',
       svg: (
         <svg viewBox="0 0 100 100" className="h-28 w-28 text-amber-400">
           <defs>
-            <linearGradient id="stopGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id="nameGrad" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stopColor="#f59e0b" />
-              <stop offset="100%" stopColor="#d97706" />
+              <stop offset="100%" stopColor="#a855f7" />
             </linearGradient>
           </defs>
-          <path
-            d="M50 85 C42 85 36 78 36 68 L36 45 C36 42 39 40 41 40 C43 40 45 42 45 45 L45 35 C45 32 48 30 50 30 C52 30 54 32 54 35 L54 32 C54 29 57 27 59 27 C61 27 63 29 63 32 L63 38 C63 35 66 33 68 33 C70 33 72 35 72 38 L72 68 C72 78 66 85 50 85 Z"
-            fill="url(#stopGrad)"
-            stroke="#fcd34d"
-            strokeWidth="2"
-          />
-          {/* Outer glow ring */}
-          <circle cx="50" cy="50" r="46" fill="none" stroke="#ef4444" strokeWidth="2" strokeDasharray="6,4" className="animate-spin" style={{ animationDuration: '20s' }} />
+          {/* Flat palms held up questioning */}
+          <path d="M22 55 C22 45 35 48 33 58 Z" fill="url(#nameGrad)" stroke="#fcd34d" strokeWidth="1.5" />
+          <path d="M78 55 C78 45 65 48 67 58 Z" fill="url(#nameGrad)" stroke="#fcd34d" strokeWidth="1.5" />
+          {/* Index drawing trace */}
+          <path d="M50 45 L50 25" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round" />
+          <circle cx="50" cy="55" r="3" fill="#10b981" />
         </svg>
       )
     }
@@ -155,31 +147,29 @@ export const SpeakToSign: React.FC = () => {
   useEffect(() => {
     if (!isPlaying || wordsList.length === 0) return
 
+    // If the full sentence is in our dictionary, we don't need word-by-word spelling
+    if (cleanTranscript in sentenceDictionary) {
+      setIsSpellingMode(false)
+      return
+    }
+
     const stepInterval = 1500 / playbackSpeed
     const timer = setInterval(() => {
       const activeWord = wordsList[activeWordIndex]
-      const hasWord = activeWord in signDictionary
-
-      if (hasWord) {
-        // Simple word playback: jump to next word
+      
+      // Unknown phrase -> spell out word-by-word or letter-by-letter
+      setIsSpellingMode(true)
+      if (spellingIndex < activeWord.length - 1) {
+        setSpellingIndex((prev) => prev + 1)
+      } else {
+        setSpellingIndex(0)
         setIsSpellingMode(false)
         setActiveWordIndex((prev) => (prev + 1) % wordsList.length)
-      } else {
-        // Unknown word: spell it out letter-by-letter
-        setIsSpellingMode(true)
-        if (spellingIndex < activeWord.length - 1) {
-          setSpellingIndex((prev) => prev + 1)
-        } else {
-          // Finished spelling this word, move to next word
-          setSpellingIndex(0)
-          setIsSpellingMode(false)
-          setActiveWordIndex((prev) => (prev + 1) % wordsList.length)
-        }
       }
     }, stepInterval)
 
     return () => clearInterval(timer)
-  }, [isPlaying, activeWordIndex, spellingIndex, wordsList, playbackSpeed])
+  }, [isPlaying, activeWordIndex, spellingIndex, wordsList, playbackSpeed, cleanTranscript])
 
   // Reset indices when recognized text changes
   useEffect(() => {
@@ -252,11 +242,17 @@ export const SpeakToSign: React.FC = () => {
     setIsListening(true)
     setMicActive(true)
 
-    // Simulate audio recognition output
-    const demoPhrases = ['hello', 'thank you', 'yes', 'no', 'stop', 'welcome']
+    // Simulate audio recognition of target sentences
+    const targetSentencesList = [
+      'hello everyone',
+      'how are you?',
+      'thank you',
+      'had your breakfast?',
+      'what is your name?'
+    ]
     setTimeout(() => {
-      const randomPhrase = demoPhrases[Math.floor(Math.random() * demoPhrases.length)]
-      setRecognizedText(randomPhrase)
+      const randomSentence = targetSentencesList[Math.floor(Math.random() * targetSentencesList.length)]
+      setRecognizedText(randomSentence)
       setIsListening(false)
       setMicActive(false)
       setIsPlaying(true)
@@ -282,42 +278,40 @@ export const SpeakToSign: React.FC = () => {
             </svg>
           </div>
           <h4 className="text-slate-400 font-medium text-sm">No Speech Input Received</h4>
-          <p className="text-[11px] text-slate-600 mt-1 max-w-[220px]">Speak or type manual text to render matching sign postures.</p>
+          <p className="text-[11px] text-slate-600 mt-1 max-w-[220px]">Speak or type one of the 5 targeted phrases to view its specific gesture representation.</p>
         </div>
       )
     }
 
+    // 1. Direct Sentence Match (highest priority)
+    const sentenceMatch = sentenceDictionary[cleanTranscript]
+    if (sentenceMatch) {
+      return (
+        <div className="flex flex-col items-center justify-center p-4 text-center">
+          {sentenceMatch.svg}
+          <h3 className="text-white font-bold text-lg mt-4 uppercase tracking-wider">{sentenceMatch.label}</h3>
+          <p className="text-xs text-slate-400 mt-1 max-w-[280px]">{sentenceMatch.description}</p>
+        </div>
+      )
+    }
+
+    // 2. Fallback: spell out letters of words sequentially
     const currentWord = wordsList[activeWordIndex]
-    const match = signDictionary[currentWord]
-
-    if (match && !isSpellingMode) {
-      // 1. Render mapped dictionary word graphic
-      return (
-        <div className="flex flex-col items-center justify-center p-4 text-center">
-          {match.svg}
-          <h3 className="text-white font-bold text-lg mt-4 uppercase tracking-wider">{match.label}</h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-[280px]">{match.description}</p>
+    const letter = currentWord[spellingIndex]?.toUpperCase()
+    return (
+      <div className="flex flex-col items-center justify-center p-4 text-center">
+        <div className="h-28 w-28 rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center relative overflow-hidden group">
+          <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(168,85,247,0.02)_1px,transparent_1px)] bg-[size:100%_4px]" />
+          <span className="text-5xl font-extrabold text-purple-400 font-mono tracking-tighter">
+            {letter}
+          </span>
         </div>
-      )
-    } else {
-      // 2. Fallback: spell out letters of the unknown word
-      const letter = currentWord[spellingIndex]?.toUpperCase()
-      return (
-        <div className="flex flex-col items-center justify-center p-4 text-center">
-          <div className="h-28 w-28 rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center relative overflow-hidden group">
-            {/* Hologram raster line effect */}
-            <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(168,85,247,0.02)_1px,transparent_1px)] bg-[size:100%_4px]" />
-            <span className="text-5xl font-extrabold text-purple-400 font-mono tracking-tighter">
-              {letter}
-            </span>
-          </div>
-          <h3 className="text-white font-bold text-lg mt-4 uppercase tracking-wider">SPELLING: "{currentWord.toUpperCase()}"</h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-[280px]">
-            Spelling letter <strong className="text-purple-400 font-mono text-sm">"{letter}"</strong> sequentially (not in default dictionary).
-          </p>
-        </div>
-      )
-    }
+        <h3 className="text-white font-bold text-lg mt-4 uppercase tracking-wider">SPELLING: "{currentWord.toUpperCase()}"</h3>
+        <p className="text-xs text-slate-400 mt-1 max-w-[280px]">
+          Phrase not in dictionary. Spelling letter <strong className="text-purple-400 font-mono text-sm">"{letter}"</strong>.
+        </p>
+      </div>
+    )
   }
 
   return (
@@ -353,7 +347,7 @@ export const SpeakToSign: React.FC = () => {
                     {isListening ? 'Listening...' : 'Microphone Offline'}
                   </h3>
                   <p className="text-[11px] text-slate-500 mt-1 max-w-[240px]">
-                    {isListening ? 'Speak a word now...' : 'Tap the microphone to convert spoken voice to sign language.'}
+                    {isListening ? 'Speak a phrase now...' : 'Tap the microphone to convert spoken voice to sign language.'}
                   </p>
                 </div>
               </div>
@@ -362,13 +356,13 @@ export const SpeakToSign: React.FC = () => {
 
           {/* Manual text form */}
           <form onSubmit={handleTextSubmit} className="flex flex-col gap-3">
-            <label className="text-xs text-slate-400 font-medium font-sans">Or type manually to translate</label>
+            <label className="text-xs text-slate-400 font-medium">Or type manually to translate</label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="Type words here (e.g. hello, yes, stop)"
+                placeholder="Type e.g., hello everyone, how are you?, thank you..."
                 className="flex-1 bg-slate-950 border border-slate-900 focus:border-purple-500/50 rounded-xl px-4 py-2.5 text-sm text-slate-200 placeholder:text-slate-650 focus:outline-none transition-colors"
               />
               <button
@@ -380,6 +374,18 @@ export const SpeakToSign: React.FC = () => {
             </div>
           </form>
         </div>
+
+        {/* target list info cheatsheet */}
+        <div className="bg-slate-900/40 border border-slate-900 rounded-2xl p-5 backdrop-blur-sm shadow-xl flex flex-col gap-2">
+          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Recognized Sentence Dictionary</h3>
+          <ul className="text-xs text-slate-500 flex flex-col gap-1.5 font-mono list-disc pl-4">
+            <li>"hello everyone"</li>
+            <li>"how are you?"</li>
+            <li>"thank you"</li>
+            <li>"had your breakfast?"</li>
+            <li>"what is your name?"</li>
+          </ul>
+        </div>
       </div>
 
       {/* Right panel: Dynamic Sign Language Output Visualizer */}
@@ -390,16 +396,14 @@ export const SpeakToSign: React.FC = () => {
             <h2 className="text-sm font-semibold text-slate-200">Sign Language Output</h2>
             {wordsList.length > 0 && (
               <div className="text-xs font-mono text-purple-400 bg-purple-500/10 px-2.5 py-0.5 rounded-md border border-purple-500/20 font-bold uppercase">
-                {isSpellingMode ? 'FINGERSPELLING' : 'WORD SIGN'}
+                {isSpellingMode ? 'FINGERSPELLING' : 'SENTENCE SIGN'}
               </div>
             )}
           </div>
 
           {/* Render output screen container */}
           <div className="bg-slate-950 border border-slate-900 rounded-xl p-8 flex flex-col items-center justify-center flex-1 min-h-[220px] relative overflow-hidden group">
-            {/* Background grid dots for tech look */}
             <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px] opacity-20" />
-            
             {renderSignOutput()}
           </div>
 
